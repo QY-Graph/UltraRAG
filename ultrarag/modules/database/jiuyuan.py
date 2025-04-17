@@ -7,6 +7,7 @@ from jiuyuan_db.vector.sdk.client import JiuyuanVector
 from ultrarag.modules.database import BaseIndex, BaseNode
 from ultrarag.modules.embedding import BaseEmbedding
 
+from loguru import logger
 
 class JiuyuanVectorStore(BaseIndex):
     def __init__(
@@ -31,7 +32,7 @@ class JiuyuanVectorStore(BaseIndex):
         """
         super().__init__()
         self.encoder = encoder
-        self.client = JiuyuanVector(
+        self.client = JiuyuanVector.from_config(
             host=host,
             port=port,
             user=user,
@@ -54,13 +55,13 @@ class JiuyuanVectorStore(BaseIndex):
         await self.client.create_table(collection_name, dimension)
 
     async def insert(
-            self,
-            collection: str,
-            payloads: List[Dict[str, Any]],
-            func: Callable = lambda x: x,
-            method: str = "dense",
-            callback: Optional[Callable[[float], None]] = None,
-            batch_size: int = 10,
+        self,
+        collection: str,
+        payloads: List[Dict[str, Any]],
+        func: Callable = lambda x: x,
+        method: str = "dense",
+        callback: Optional[Callable[[float], None]] = None,
+        batch_size: int = 10,
     ) -> None:
         """
         Insert data into the vector database while reporting progress via a callback.
@@ -73,73 +74,116 @@ class JiuyuanVectorStore(BaseIndex):
             callback (Optional[Callable]): Callback function for reporting insertion progress.
             batch_size (int): Number of records to insert per batch.
         """
-        # Extract text content and encode embeddings.
         contents = [func(item) for item in payloads]
-        data_embeddings = await self.encoder.document_encode(contents)
-        if len(data_embeddings) != len(payloads):
+        # [logger.info(f"content: {content}") for content in contents]
+        embeddings = await self.encoder.document_encode(contents)
+        # [logger.info(f"embed: {embed.get('dense_embed', None)}") for embed in embeddings]
+        if len(embeddings) != len(payloads):
             raise ValueError("Embedding count does not match payload count.")
+        records = []
+        for content, payload, embed in zip(contents, payloads, embeddings):
+            if method == "dense":
+                records.append(
+                    Record.from_text(text=content,
+                                     embedding=embed.get("dense_embed", None),
+                                     meta=payload)
+                )
+            elif method == "hybrid":
+                records.append(
+                    Record.from_text(text=content,
+                                     embedding=embed.get("hybrid_embed", None),
+                                     meta=payload)
+                )
+            else:
+                raise ValueError(f"Unsupported method: {method}")
 
-        # Create Record instances from the provided data.
-        records = [
-            Record.from_text(text=content, embedding=embed, meta=payload)
-            for content, payload, embed in zip(contents, payloads, data_embeddings)
-        ]
+        await self.insert_records(collection, records, callback, batch_size)
 
-        total_records = len(records)
-        # Batch insertion and progress reporting.
-        for i in range(0, total_records, batch_size):
+    async def insert_records(
+        self,
+        collection: str,
+        records: List[Record],
+        callback: Optional[Callable[[float], None]] = None,
+        batch_size: int = 10,
+    ) -> None:
+        """
+        Insert pre-encoded records into the collection.
+
+        Args:
+            collection (str): Collection name.
+            records (List[Record]): List of Record objects.
+            callback (Optional[Callable]): Progress callback.
+            batch_size (int): Batch size.
+        """
+        total = len(records)
+        for i in range(0, total, batch_size):
             batch = records[i: i + batch_size]
             await self.client.insert(collection, batch)
-            progress = (i + len(batch)) / total_records * 100.0
             if callback:
-                callback(progress)
+                callback((i + len(batch)) / total * 100.0)
 
     async def search(
-            self,
-            collection: Union[str, List[str]],
-            query: str,
-            topn: int = 5,
-            method: str = "dense",
-            **kwargs,
-    ) -> List[BaseNode]:
+        self,
+        collection: Union[str, List[str]],
+        query: str,
+        topn: int = 5,
+        method: str = "dense",
+        **kwargs,
+    ) -> List['BaseNode']:
         """
         Search the vector database for similar records.
 
         Args:
-            collection (Union[str, List[str]]): Collection name or a list of collection names.
-            query (str): Query text.
-            topn (int): Number of top results to return.
+            collection (Union[str, List[str]]): Collection name or list of names.
+            query (str): Input query.
+            topn (int): Top N results.
             method (str): Vector indexing method.
-            **kwargs: Additional keyword arguments.
+            **kwargs: Additional options.
 
         Returns:
-            List[Any]: A list of BaseNode objects containing content, score, and payload.
+            List[BaseNode]: List of result nodes.
         """
-        # Encode the query into an embedding
-        query_embedding = await self.encoder.query_encode(query)
+        embedding = await self.encoder.query_encode(query)
+        if method == "dense":
+            query_embedding = embedding.get("dense_embed", None)
+        elif method == "hybrid":
+            query_embedding = embedding.get("hybrid_embed", None)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
 
-        # If collection is a list, execute search for each collection concurrently.
+        return await self.search_by_embedding(collection, query_embedding, topn)
+
+    async def search_by_embedding(
+        self,
+        collection: Union[str, List[str]],
+        query_embedding: List[float],
+        topn: int,
+    ) -> List['BaseNode']:
+        """
+        Search using a precomputed embedding.
+
+        Args:
+            collection (Union[str, List[str]]): Collection(s) to search.
+            query_embedding (List[float]): Query embedding vector.
+            topn (int): Number of top results to return.
+
+        Returns:
+            List[BaseNode]: Result nodes.
+        """
         if isinstance(collection, list):
-            # Launch searches concurrently across the specified collections.
             results_list = await asyncio.gather(
                 *(self.client.search(coll, query_embedding, top_k=topn) for coll in collection)
             )
-            # Flatten the list of results
             all_results = [item for sublist in results_list for item in sublist]
-            # Sort the aggregated results by distance (assumed lower is better)
             all_results.sort(key=lambda x: x[1])
-            # Select only the top N overall
             results = all_results[:topn]
         else:
-            # For a single collection, perform a normal search.
             results = await self.client.search(collection, query_embedding, top_k=topn)
 
-        # Create the response as a list of BaseNode objects.
-        response_result = [
+        return [
             BaseNode(content=record.text, score=distance, payload=record.to_dict())
             for record, distance in results
         ]
-        return response_result
 
     async def remove(self, collection: Union[str, List[str]]) -> None:
         """

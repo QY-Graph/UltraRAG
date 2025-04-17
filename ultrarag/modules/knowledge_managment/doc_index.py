@@ -6,6 +6,8 @@ import jsonlines
 from PIL import Image
 from pathlib import Path
 from ultrarag.common.utils import get_image_md5
+from ultrarag.modules.database.jiuyuan import JiuyuanVectorStore
+
 # TODO
 use_stanza = False
 if use_stanza:
@@ -113,6 +115,7 @@ def get_spans(text_chunks):
 
 async def doc_index(
         qdrant_index: QdrantIndex,
+        jiuyuan_index: JiuyuanVectorStore,
         knowledge_id,
         file_path,
         nth_file,
@@ -159,7 +162,9 @@ async def doc_index(
     method = "dense"
     if nth_file == 0:
         await qdrant_index.create(collection_name=knowledge_id, index_type=method)
+        await jiuyuan_index.create(collection_name=knowledge_id, index_type=method)
     await qdrant_index.insert(knowledge_id, payloads, func=lambda x: x["content"], method=method)
+    await jiuyuan_index.insert(knowledge_id, payloads, func=lambda x: x["content"], method=method)
 
 
 async def vis_doc_index(

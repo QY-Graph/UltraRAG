@@ -4,6 +4,7 @@ import pandas as pd
 import os
 from ultrarag.common.utils import get_embedding_types
 from ultrarag.modules.database import QdrantIndex, BaseNode
+from ultrarag.modules.database.jiuyuan import JiuyuanVectorStore
 from ultrarag.modules.knowledge_managment.doc_index import doc_index, vis_doc_index, doc_to_docx
 from ultrarag.modules.embedding import BaseEmbedding
 from transformers import AutoConfig
@@ -16,6 +17,14 @@ class QdrantIndexSearchWarper:
         if os.path.exists(knowledge_stat_tab_path):
             self.init_files(knowledge_stat_tab_path)
         self.qdrant_index = QdrantIndex(url = qdrant_path, encoder = embedding_model)
+        self.jiuyuan_index = JiuyuanVectorStore(
+        host="localhost",
+        port=5432,
+        user="postgres",
+        password="mysecretpassword",
+        db_name="postgres",
+        encoder=embedding_model
+        )
         self.embedding_model = embedding_model
 
     # todo
@@ -66,13 +75,14 @@ class QdrantIndexSearchWarper:
                 self.chunk_files.append(os.path.join(kb_base, f"{knowledge_stat_tab['knowledge_base_id'].values[i]}.jsonl"))
         self.org_files = knowledge_stat_tab["file_ids"].values
         
-    def search(self, query: str, topn: int=5, method: str="dense", **kargs) -> List[BaseNode]:
+    async def search(self, query: str, topn: int=5, method: str="dense", **kargs) -> List[BaseNode]:
         """
         should be called after await, i.e. be called as <search_resaults = await search(...)>
         """
         if 'collection' in kargs:
             del kargs['collection']
-        return self.qdrant_index.search(self.knowledge_id, query, topn, method, **kargs)
+        # return self.qdrant_index.search(self.knowledge_id, query, topn, method, **kargs)
+        return await self.jiuyuan_index.search(self.knowledge_id, query, topn, method, **kargs)
     
     def search_beta(self, query: str, topn: int=5, method: str="dense", **kargs) -> List[BaseNode]:
         """
@@ -107,6 +117,14 @@ class Knowledge_Managment:
             os.remove(lock_file_path)
         
         qdrant_index = QdrantIndex(url=qdrant_path, encoder=embedding_model)
+        jiuyuan_index = JiuyuanVectorStore(
+            host="localhost",
+            port=5432,
+            user="postgres",
+            password="mysecretpassword",
+            db_name="postgres",
+            encoder=embedding_model
+        )
         error_files = []
         empty_files = []
         n_file=0
@@ -151,6 +169,7 @@ class Knowledge_Managment:
                 else:
                     await doc_index(
                         qdrant_index=qdrant_index,
+                        jiuyuan_index=jiuyuan_index,
                         knowledge_id=knowledge_id,
                         file_path=file_path,
                         nth_file=n_file,
